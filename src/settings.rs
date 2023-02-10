@@ -80,6 +80,11 @@ pub struct Playground {
     pub github_token: String,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct Chat {
+    pub api_key: String,
+}
+
 #[derive(Deserialize)]
 pub struct Settings {
     pub db: DB,
@@ -92,6 +97,7 @@ pub struct Settings {
     pub sentry: Option<Sentry>,
     pub basket: Option<Basket>,
     pub playground: Option<Playground>,
+    pub chat: Option<Chat>,
     #[serde(default)]
     pub skip_migrations: bool,
 }

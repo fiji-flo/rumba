@@ -68,13 +68,14 @@ sentry = "0.29"
 sentry-actix = "0.29"
 
 basket = "0.0.5"
+async-openai = "0.6"
 
 octocrab = "0.18"
 
 [dev-dependencies]
-stubr = "0.5.1"
-stubr-attributes = "0.5.1"
+stubr = "0.5"
+stubr-attributes = "0.5"
 assert-json-diff = "2"
 
 [patch.crates-io]
-hyperx = { git = "https://github.com/fiji-flo/hyperx" }
+hyperx = { git = "https://github.com/fiji-flo/hyperx"}

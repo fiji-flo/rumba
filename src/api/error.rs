@@ -4,6 +4,7 @@ use actix_web::http::header::HeaderName;
 use actix_web::http::StatusCode;
 use actix_web::middleware::{ErrorHandlerResponse, ErrorHandlers};
 use actix_web::{HttpResponse, ResponseError};
+use async_openai::error::OpenAIError;
 use basket::BasketError;
 use serde::Serialize;
 use serde_json::json;
@@ -94,6 +95,8 @@ pub enum ApiError {
     BasketError(#[from] BasketError),
     #[error("Playground error: {0}")]
     PlaygroundError(#[from] PlaygroundError),
+    #[error("OpenAI error: {0}")]
+    OpenAIError(#[from] OpenAIError),
     #[error("Unknown error: {0}")]
     Generic(String),
 }
@@ -123,6 +126,7 @@ impl ApiError {
             Self::PlaygroundError(_) => "Error querying playground",
             Self::Generic(err) => err,
             Self::LoginRequiredForFeature(_) => "Login Required",
+            Self::OpenAIError(_) => "AI error",
         }
     }
 }
