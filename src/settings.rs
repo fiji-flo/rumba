@@ -75,6 +75,11 @@ pub struct Basket {
     pub basket_url: Url,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct Playground {
+    pub github_token: String,
+}
+
 #[derive(Deserialize)]
 pub struct Settings {
     pub db: DB,
@@ -86,7 +91,9 @@ pub struct Settings {
     pub metrics: Metrics,
     pub sentry: Option<Sentry>,
     pub basket: Option<Basket>,
+    pub playground: Option<Playground>,
 }
+
 
 impl Settings {
     pub fn new() -> Result<Self, ConfigError> {
