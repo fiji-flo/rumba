@@ -5,6 +5,7 @@ pub mod common;
 pub mod elastic;
 pub mod error;
 pub mod fxa_webhook;
+pub mod play;
 pub mod healthz;
 pub mod newsletter;
 pub mod notifications;
