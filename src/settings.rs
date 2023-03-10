@@ -102,7 +102,6 @@ pub struct Settings {
     pub skip_migrations: bool,
 }
 
-
 impl Settings {
     pub fn new() -> Result<Self, ConfigError> {
         let file = env::var("MDN_SETTINGS").unwrap_or_else(|_| String::from(".settings.toml"));
