@@ -1,5 +1,3 @@
-use std::iter::once;
-
 use actix_identity::Identity;
 use actix_web::{
     web::{Data, Json},
@@ -23,6 +21,12 @@ use crate::{
 #[derive(Deserialize)]
 pub struct ChatRequest {
     pub prompt: String,
+}
+
+#[derive(Deserialize)]
+pub struct ExplainRequest {
+    code: String,
+    selection: String,
 }
 
 #[derive(Serialize)]
@@ -70,13 +74,20 @@ pub struct EditRequest {
     pub input: Option<String>,
 }
 
-static SYSTEM: &str = r#"You are a system that provides working front-end code.\
+static EXPLAIN_SYSTEM: &str = r#"You are a system that explains code examples.\
+These example come from the MDN web docs. \
+You will be given a code example and a selected part of this examples. \
+You will explain the selected part in context of the provided code example."#;
+
+static EXAMPLE_SYSTEM: &str = r#"You are a system that provides working front-end code.\
 The code must not depend on 3rd party libraries. \
 The code must not use style attributes on html tags. \
 You reply with code separated in markdown code blocks for HTML, CSS and JS.
 You must use codeblocks with language specifiers, like ```js \
 and must not include CSS or JavaScript in the html block. \
 The user will ask for web components or any part or a web site."#;
+
+static EXAMPLE_REFINE: &str = r#"You must not reply with partial updates, when you modify code reply the fully updated code block(s)."#;
 
 pub async fn chat(
     pool: Data<Pool>,
@@ -103,20 +114,38 @@ pub async fn chat(
     Ok(HttpResponse::NotImplemented().finish())
 }
 
-pub async fn explain(
+pub async fn explain_chat(
+    user_id: Identity,
     openai_client: Data<Option<Client>>,
-    chat_request: Json<ChatRequest>,
+    chat_request: Json<ExplainRequest>,
 ) -> Result<HttpResponse, ApiError> {
     if let Some(client) = &**openai_client {
-        let request = CreateCompletionRequestArgs::default()
-            .model("text-davinci-003")
-            .prompt(&chat_request.prompt)
-            .max_tokens(2048_u16)
+        let ExplainRequest { code, selection } = chat_request.into_inner();
+        let name = user_id.id().unwrap();
+        let system_message = ChatCompletionRequestMessageArgs::default()
+            .role(Role::System)
+            .content(EXPLAIN_SYSTEM)
+            .name(&name)
+            .build()?;
+        let prompt = ChatCompletionRequestMessageArgs::default()
+                    .role(Role::User)
+                    .content(format!(
+                        "Given the following code: ```{code}```. Can you explain the following part: {selection}",
+                    ))
+                    .name(&name)
+                    .build()?;
+        let request = CreateChatCompletionRequestArgs::default()
+            .model("gpt-3.5-turbo-0301")
+            .messages(vec![system_message, prompt])
             .temperature(0.0)
             .build()?;
 
-        let mut response = client.completions().create(request).await?;
-        let reply = response.choices.pop().map(|r| r.text).unwrap_or_default();
+        let mut response = client.chat().create(request).await?;
+        let reply = response
+            .choices
+            .pop()
+            .map(|r| r.message.content)
+            .unwrap_or_default();
         return Ok(HttpResponse::Ok().json(ChatResponse { reply }));
     };
     Ok(HttpResponse::NotImplemented().finish())
@@ -156,6 +185,16 @@ pub async fn generate_example(
         } = chat_request.into_inner();
 
         let name = user_id.id().unwrap();
+        let system_message = ChatCompletionRequestMessageArgs::default()
+            .role(Role::System)
+            .content(EXAMPLE_SYSTEM)
+            .name(&name)
+            .build()?;
+        let refine_message = ChatCompletionRequestMessageArgs::default()
+            .role(Role::System)
+            .content(EXAMPLE_REFINE)
+            .name(&name)
+            .build()?;
         println!("{prompt}\n---");
         let mut messages = match (context, code) {
             (None, None) => {
@@ -164,14 +203,7 @@ pub async fn generate_example(
                     .content(format!("Give me {}", prompt))
                     .name(&name)
                     .build()?;
-                vec![
-                    ChatCompletionRequestMessageArgs::default()
-                        .role(Role::System)
-                        .content(SYSTEM)
-                        .name(&name)
-                        .build()?,
-                    prompt,
-                ]
+                vec![system_message, prompt]
             }
             (None, Some(code)) => {
                 let prompt = ChatCompletionRequestMessageArgs::default()
@@ -182,14 +214,7 @@ pub async fn generate_example(
                     ))
                     .name(&name)
                     .build()?;
-                vec![
-                    ChatCompletionRequestMessageArgs::default()
-                        .role(Role::System)
-                        .content(SYSTEM)
-                        .name(&name)
-                        .build()?,
-                    prompt,
-                ]
+                vec![system_message, refine_message, prompt]
             }
             (Some(messages), None) => {
                 let prompt = ChatCompletionRequestMessageArgs::default()
@@ -206,7 +231,7 @@ pub async fn generate_example(
                             name: Some(name.clone()),
                         }
                     })
-                    .chain(once(prompt))
+                    .chain(vec![refine_message, prompt])
                     .collect()
             }
             (Some(messages), Some(code)) => {
@@ -227,12 +252,12 @@ pub async fn generate_example(
                             name: Some(name.clone()),
                         }
                     })
-                    .chain(once(prompt))
+                    .chain(vec![refine_message, prompt])
                     .collect()
             }
         };
         let request = CreateChatCompletionRequestArgs::default()
-            .model("gpt-3.5-turbo")
+            .model("gpt-3.5-turbo-0301")
             .messages(messages.clone())
             .temperature(0.0)
             .build()?;
