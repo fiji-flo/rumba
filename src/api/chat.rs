@@ -1,3 +1,9 @@
+use std::{
+    collections::HashMap,
+    sync::{Arc, RwLock},
+    time::Duration,
+};
+
 use actix_identity::Identity;
 use actix_web::{
     web::{Data, Json},
@@ -6,17 +12,15 @@ use actix_web::{
 use async_openai::{
     types::{
         ChatCompletionRequestMessage, ChatCompletionRequestMessageArgs,
-        ChatCompletionResponseMessage, CreateChatCompletionRequestArgs,
-        CreateCompletionRequestArgs, Role,
+        CreateChatCompletionRequestArgs, Role,
     },
     Client,
 };
+use futures_timer::Delay;
+use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 
-use crate::{
-    api::error::ApiError,
-    db::{users::get_user, Pool},
-};
+use crate::api::error::ApiError;
 
 #[derive(Deserialize)]
 pub struct ChatRequest {
@@ -49,20 +53,47 @@ pub enum Model {
     Code,
 }
 
-#[derive(Deserialize, Serialize, Default, Clone)]
+#[derive(Deserialize, Serialize, Debug, Default, Clone, PartialEq, Eq, Hash)]
 pub struct Code {
     pub html: Option<String>,
     pub css: Option<String>,
     pub js: Option<String>,
 }
-#[derive(Deserialize)]
+
+#[derive(Deserialize, Serialize, Clone, Debug)]
+pub struct ChatRequestMessage {
+    role: Role,
+    content: String,
+}
+
+impl PartialEq for ChatRequestMessage {
+    fn eq(&self, other: &Self) -> bool {
+        let role = matches!(
+            (&self.role, &other.role),
+            (Role::System, Role::System)
+                | (Role::User, Role::User)
+                | (Role::Assistant, Role::Assistant)
+        );
+        role && self.content == other.content
+    }
+}
+impl Eq for ChatRequestMessage {}
+
+impl std::hash::Hash for ChatRequestMessage {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.content.hash(state);
+        self.role.to_string().hash(state);
+    }
+}
+
+#[derive(Deserialize, Serialize, Clone, PartialEq, Eq, Hash)]
 pub struct ExampleRequest {
     pub prompt: String,
     pub code: Option<Code>,
-    pub context: Option<Vec<ChatCompletionResponseMessage>>,
+    pub context: Option<Vec<ChatRequestMessage>>,
 }
 
-#[derive(Serialize, Default)]
+#[derive(Serialize, Default, Clone)]
 pub struct ExampleResponse {
     pub code: Code,
     pub context: Option<Vec<ChatCompletionRequestMessage>>,
@@ -89,53 +120,28 @@ The user will ask for web components or any part or a web site."#;
 
 static EXAMPLE_REFINE: &str = r#"You must not reply with partial updates, when you modify code reply the fully updated code block(s)."#;
 
-pub async fn chat(
-    pool: Data<Pool>,
-    user_id: Identity,
-    openai_client: Data<Option<Client>>,
-    chat_request: Json<ChatRequest>,
-) -> Result<HttpResponse, ApiError> {
-    let mut conn = pool.get()?;
-    let user = get_user(&mut conn, user_id.id().unwrap())?;
-    if !user.is_admin {
-        return Ok(HttpResponse::Unauthorized().finish());
-    }
-    if let Some(client) = &**openai_client {
-        let request = CreateCompletionRequestArgs::default()
-            .model("text-davinci-003")
-            .prompt(&chat_request.prompt)
-            .max_tokens(2048_u16)
-            .build()?;
-
-        let mut response = client.completions().create(request).await?;
-        let reply = response.choices.pop().map(|r| r.text).unwrap_or_default();
-        return Ok(HttpResponse::Ok().json(ChatResponse { reply }));
-    };
-    Ok(HttpResponse::NotImplemented().finish())
-}
+pub static CACHE: Lazy<Arc<RwLock<HashMap<ExampleRequest, ExampleResponse>>>> =
+    Lazy::new(|| Arc::new(RwLock::new(HashMap::new())));
 
 pub async fn explain_chat(
-    user_id: Identity,
+    _: Identity,
     openai_client: Data<Option<Client>>,
     chat_request: Json<ExplainRequest>,
 ) -> Result<HttpResponse, ApiError> {
     if let Some(client) = &**openai_client {
         let ExplainRequest { code, selection } = chat_request.into_inner();
-        let name = user_id.id().unwrap();
         let system_message = ChatCompletionRequestMessageArgs::default()
             .role(Role::System)
             .content(EXPLAIN_SYSTEM)
-            .name(&name)
             .build()?;
         let prompt = ChatCompletionRequestMessageArgs::default()
                     .role(Role::User)
                     .content(format!(
                         "Given the following code: ```{code}```. Can you explain the following part: {selection}",
                     ))
-                    .name(&name)
                     .build()?;
         let request = CreateChatCompletionRequestArgs::default()
-            .model("gpt-3.5-turbo-0301")
+            .model("gpt-3.5-turbo")
             .messages(vec![system_message, prompt])
             .temperature(0.0)
             .build()?;
@@ -173,35 +179,38 @@ fn code_to_prompt(Code { html, css, js }: Code) -> String {
 }
 
 pub async fn generate_example(
-    user_id: Identity,
+    _: Identity,
     openai_client: Data<Option<Client>>,
     chat_request: Json<ExampleRequest>,
 ) -> Result<HttpResponse, ApiError> {
+    let response = { (*CACHE.read().unwrap()).get(&*chat_request).cloned() };
+    if let Some(response) = response {
+        println!("cached...");
+        Delay::new(Duration::from_secs(8)).await;
+        return Ok(HttpResponse::Ok().json(response));
+    }
     if let Some(client) = &**openai_client {
+        let chat_request = chat_request.into_inner();
         let ExampleRequest {
             context,
             prompt,
             code,
-        } = chat_request.into_inner();
+        } = chat_request.clone();
 
-        let name = user_id.id().unwrap();
+        println!("---{context:#?}\n---\n{prompt:#?}\n---\n{code:#?}\n---");
         let system_message = ChatCompletionRequestMessageArgs::default()
             .role(Role::System)
             .content(EXAMPLE_SYSTEM)
-            .name(&name)
             .build()?;
         let refine_message = ChatCompletionRequestMessageArgs::default()
             .role(Role::System)
             .content(EXAMPLE_REFINE)
-            .name(&name)
             .build()?;
-        println!("{prompt}\n---");
         let mut messages = match (context, code) {
             (None, None) => {
                 let prompt = ChatCompletionRequestMessageArgs::default()
                     .role(Role::User)
                     .content(format!("Give me {}", prompt))
-                    .name(&name)
                     .build()?;
                 vec![system_message, prompt]
             }
@@ -212,7 +221,6 @@ pub async fn generate_example(
                         "Given the following code {}. Can you {prompt}",
                         code_to_prompt(code)
                     ))
-                    .name(&name)
                     .build()?;
                 vec![system_message, refine_message, prompt]
             }
@@ -220,17 +228,16 @@ pub async fn generate_example(
                 let prompt = ChatCompletionRequestMessageArgs::default()
                     .role(Role::User)
                     .content(format!("Can you {prompt}?",))
-                    .name(&name)
                     .build()?;
                 messages
                     .into_iter()
-                    .map(|ChatCompletionResponseMessage { role, content }| {
-                        ChatCompletionRequestMessage {
+                    .map(
+                        |ChatRequestMessage { role, content }| ChatCompletionRequestMessage {
                             role,
                             content,
-                            name: Some(name.clone()),
-                        }
-                    })
+                            name: None,
+                        },
+                    )
                     .chain(vec![refine_message, prompt])
                     .collect()
             }
@@ -241,23 +248,22 @@ pub async fn generate_example(
                         "I've modified the code to be {}. Can you {prompt}",
                         code_to_prompt(code)
                     ))
-                    .name(&name)
                     .build()?;
                 messages
                     .into_iter()
-                    .map(|ChatCompletionResponseMessage { role, content }| {
-                        ChatCompletionRequestMessage {
+                    .map(
+                        |ChatRequestMessage { role, content }| ChatCompletionRequestMessage {
                             role,
                             content,
-                            name: Some(name.clone()),
-                        }
-                    })
+                            name: None,
+                        },
+                    )
                     .chain(vec![refine_message, prompt])
                     .collect()
             }
         };
         let request = CreateChatCompletionRequestArgs::default()
-            .model("gpt-3.5-turbo-0301")
+            .model("gpt-3.5-turbo")
             .messages(messages.clone())
             .temperature(0.0)
             .build()?;
@@ -273,7 +279,7 @@ pub async fn generate_example(
         messages.push(ChatCompletionRequestMessage {
             role: reply.role,
             content: reply.content.clone(),
-            name: Some(name),
+            name: None,
         });
         let content = reply.content;
 
@@ -293,6 +299,11 @@ pub async fn generate_example(
                 response.code.js = Some(x.trim().to_string());
             }
         }
+
+        CACHE
+            .write()
+            .unwrap()
+            .insert(chat_request, response.clone());
 
         return Ok(HttpResponse::Ok().json(response));
     };

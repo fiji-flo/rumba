@@ -71,6 +71,7 @@ basket = "0.0.5"
 async-openai = "0.9"
 
 octocrab = "0.18"
+futures-timer = "3.0.2"
 
 [dev-dependencies]
 stubr = "0.5"
